@@ -1,6 +1,7 @@
 """Behavioral checks for shard prefetch and checkpoint recovery."""
 
 import io
+import shutil
 import tarfile
 from pathlib import Path
 from threading import Event
@@ -82,3 +83,81 @@ def test_repeat_resume(tmp_path: Path) -> None:
     continuation = iter(resumed)
     assert [next(continuation)["__key__"] for _ in range(3)] == ["b", "a", "b"]
     continuation.close()
+
+
+def test_direct_local_read_skips_staging_and_resumes_in_stage_mode(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Direct local reads never copy shards and retain checkpoint portability."""
+    paths = [tmp_path / f"{index}.tar" for index in range(2)]
+    for index, path in enumerate(paths):
+        make_shard(path, [f"{index}a", f"{index}b"])
+    original = stream._download
+
+    def forbidden(url: str, destination: Path) -> Path:
+        raise AssertionError("Direct local access must not stage shards")
+
+    monkeypatch.setattr(stream, "_download", forbidden)
+    dataset = WebDataStream([str(path) for path in paths], local_access="direct")
+    iterator = iter(dataset)
+    assert next(iterator)["__key__"] == "0a"
+    state = dataset.state_dict()
+    iterator.close()
+    monkeypatch.setattr(stream, "_download", original)
+    resumed = WebDataStream([str(path) for path in paths], local_access="stage")
+    resumed.load_state_dict(state)
+    assert [sample["__key__"] for sample in resumed] == ["0b", "1a", "1b"]
+
+
+def test_direct_file_url(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A file URL can also be read without staging."""
+    path = tmp_path / "one.tar"
+    make_shard(path, ["a"])
+
+    def forbidden(url: str, destination: Path) -> Path:
+        raise AssertionError("Direct file URL must not stage")
+
+    monkeypatch.setattr(stream, "_download", forbidden)
+    assert [sample["__key__"] for sample in WebDataStream([path.as_uri()], local_access="direct")] == ["a"]
+
+
+def test_ssh_urls_use_rsync_and_ssh_config_by_default(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """SSH shards use rsync with plain ssh, leaving ControlMaster to config."""
+    paths = [tmp_path / f"{index}.tar" for index in range(2)]
+    for index, path in enumerate(paths):
+        make_shard(path, [str(index)])
+    calls: list[list[str]] = []
+
+    def fake_run(command: list[str], check: bool) -> None:
+        calls.append(command)
+        assert command[:4] == ["rsync", "-e", "ssh", "--"]
+        assert command[4].startswith("cluster:")
+        index = int(command[4].rsplit("-", 1)[1].split(".")[0])
+        shutil.copyfile(paths[index], command[5])
+
+    monkeypatch.setattr(stream.subprocess, "run", fake_run)
+    urls = [f"ssh://cluster/project/shard-{index}.tar" for index in range(2)]
+    assert [sample["__key__"] for sample in WebDataStream(urls)] == ["0", "1"]
+    assert len(calls) == 2
+
+
+def test_ssh_rsync_can_be_disabled(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The transport switch leaves SSH URLs to the original fsspec path."""
+    path = tmp_path / "one.tar"
+    make_shard(path, ["a"])
+    seen: list[str] = []
+
+    def fake_download(url: str, destination: Path) -> Path:
+        seen.append(url)
+        shutil.copyfile(path, destination)
+        return destination
+
+    def forbidden(*args: object, **kwargs: object) -> None:
+        raise AssertionError("rsync must not run")
+
+    monkeypatch.setattr(stream, "_download", fake_download)
+    monkeypatch.setattr(stream.subprocess, "run", forbidden)
+    assert [sample["__key__"] for sample in WebDataStream(["ssh://cluster/project/one.tar"], ssh_rsync=False)] == ["a"]
+    assert seen == ["ssh://cluster/project/one.tar"]

@@ -28,6 +28,10 @@ def test_seed_simulate_and_resume(tmp_path: Path) -> None:
                                    "--train-seconds", "0", "--checkpoint", str(checkpoint), "--resume"])
     assert resumed.exit_code == 0, resumed.output
     assert "next=[0, 1, 2]" in resumed.output
+    direct = runner.invoke(main, ["simulate", str(output), "--steps", "1",
+                                  "--train-seconds", "0", "--local-access", "direct"])
+    assert direct.exit_code == 0, direct.output
+    assert "samples=2" in direct.output
 
 
 def test_seed_refuses_nonempty_output(tmp_path: Path) -> None:

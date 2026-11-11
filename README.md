@@ -34,6 +34,44 @@ webdatastream simulate ./sample-wds --prefetch-shards 3 --batch-size 2 --steps 8
 nonempty output directory. `simulate` accepts `--pattern` for shard filenames
 and reads either generated shards or an existing local WebDataset directory.
 
+For shards on a shared project store, opt into direct reads to avoid copying
+them to local scratch space:
+
+```bash
+webdatastream simulate /project/store/audio-wds --local-access direct
+```
+
+The default `--local-access stage` still copies local shards into a temporary
+cache (such as `$SLURM_TMPDIR`) and prefetches upcoming shards. In the Python
+API, pass `local_access="direct"` or `local_access="stage"`. Direct mode uses
+local paths and `file://` URLs in place; other fsspec URLs still stage. The
+checkpoint cursor is compatible across the two modes when the ordered shard
+URLs are the same.
+
+## SSH shards
+
+SSH shard URLs use `rsync` over the `ssh` command by default. This lets SSH
+read your `~/.ssh/config`, including ControlMaster settings for MFA-backed
+clusters. The library does not create or close master connections. Shard
+prefetch remains bounded by `prefetch_shards`.
+
+```python
+stream = WebDataStream([
+    "ssh://cluster/project/data/shard-000000.tar",
+    "ssh://cluster/project/data/shard-000001.tar",
+])
+```
+
+SCP-style URLs such as `cluster:/project/data/shard-000000.tar` also work.
+For a nonstandard port, use `ssh://cluster:2222/project/data/shard.tar` or set
+the port in SSH config. Set `ssh_rsync=False` to pass SSH URLs to fsspec
+instead. The simulation CLI accepts ordered `--shard-url` options and
+`--no-ssh-rsync`:
+
+```bash
+webdatastream simulate --shard-url ssh://cluster/project/data/shard-000000.tar --shard-url ssh://cluster/project/data/shard-000001.tar
+```
+
 ## Python API
 
 ```python

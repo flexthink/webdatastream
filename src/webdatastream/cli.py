@@ -81,28 +81,38 @@ def seed(output: Path, shards: int, samples_per_shard: int, duration: float, sam
 
 
 @main.command("simulate")
-@click.argument("source", type=click.Path(exists=True, file_okay=False, path_type=Path))
+@click.argument("source", required=False, type=click.Path(exists=True, file_okay=False, path_type=Path))
+@click.option("--shard-url", multiple=True, help="Ordered remote shard URL; repeat for each shard.")
+@click.option("--ssh-rsync/--no-ssh-rsync", default=True, show_default=True)
 @click.option("--pattern", default="*.tar", show_default=True)
 @click.option("--prefetch-shards", type=click.IntRange(min=1), default=3, show_default=True)
+@click.option("--local-access", type=click.Choice(["stage", "direct"]), default="stage", show_default=True)
 @click.option("--batch-size", type=click.IntRange(min=1), default=2, show_default=True)
 @click.option("--steps", type=click.IntRange(min=1), default=8, show_default=True)
 @click.option("--train-seconds", type=click.FloatRange(min=0), default=0.1, show_default=True)
 @click.option("--checkpoint", type=click.Path(path_type=Path), default=None)
 @click.option("--resume", is_flag=True, help="Load the existing --checkpoint before simulation.")
 def simulate(
-    source: Path, pattern: str, prefetch_shards: int, batch_size: int,
+    source: Path | None, shard_url: tuple[str, ...], ssh_rsync: bool,
+    pattern: str, prefetch_shards: int, local_access: str, batch_size: int,
     steps: int, train_seconds: float, checkpoint: Path | None, resume: bool,
 ) -> None:
     """Decode FLAC batches and pause to imitate model training.
 
     Arguments
     ---------
-    source : pathlib.Path
-        Directory containing tar shards.
+    source : pathlib.Path or None
+        Directory containing tar shards, omitted when using shard URLs.
+    shard_url : tuple of str
+        Explicit ordered remote shard URLs.
+    ssh_rsync : bool
+        Route SSH URLs through rsync using the user's SSH configuration.
     pattern : str
         Shard filename glob.
     prefetch_shards, batch_size, steps : int
         Streaming and simulation dimensions.
+    local_access : str
+        Stage local shards or read them directly.
     train_seconds : float
         Simulated training time after each batch.
     checkpoint : pathlib.Path or None
@@ -115,13 +125,21 @@ def simulate(
     None
     """
     sf = _soundfile()
-    paths = sorted(source.glob(pattern))
-    paths = [path.resolve() for path in paths if path.is_file()]
-    if not paths:
-        raise click.ClickException(f"No tar shards match {source / pattern}")
+    if (source is None) == (not shard_url):
+        raise click.UsageError("Provide either SOURCE or one or more --shard-url options")
+    if source is not None:
+        paths = sorted(source.glob(pattern))
+        urls = [str(path.resolve()) for path in paths if path.is_file()]
+        if not urls:
+            raise click.ClickException(f"No tar shards match {source / pattern}")
+    else:
+        urls = list(shard_url)
     if resume and checkpoint is None:
         raise click.UsageError("--resume requires --checkpoint")
-    dataset = WebDataStream([str(path) for path in paths], prefetch_shards=prefetch_shards)
+    dataset = WebDataStream(
+        urls, prefetch_shards=prefetch_shards,
+        local_access=local_access, ssh_rsync=ssh_rsync,
+    )
     if resume:
         assert checkpoint is not None
         try:
