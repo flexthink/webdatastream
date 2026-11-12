@@ -95,6 +95,12 @@ stream.load_state_dict(checkpoint["data"])
 loader = DataLoader(stream, batch_size=32, num_workers=0)
 ```
 
+To start at a specific shard and sample without a checkpoint, call
+`stream.seek(shards[10], 0)` before creating the iterator. The first argument
+can also be a zero-based shard ordinal. Earlier shards are not opened; a
+nonzero sample index is reached by sequentially counting samples within the
+selected shard.
+
 `shards` accepts local paths and URLs supported by fsspec. Object-store URLs
 may need the corresponding fsspec backend package and credentials. Shards must
 contain sample members consecutively, as in standard WebDataset tar files.

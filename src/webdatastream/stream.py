@@ -224,6 +224,29 @@ class WebDataStream(IterableDataset[dict[str, Any]]):
         return {"version": 1, "shards": list(self.shards), "repeat": self.repeat,
                 "position": [self._cycle, self._shard, self._sample]}
 
+    def seek(self, shard: str | int, index: int = 0, *, cycle: int = 0) -> None:
+        """Set the next sample by shard URL (or ordinal) and sample index.
+
+        Earlier shards are not opened. Samples preceding ``index`` in the
+        selected shard are counted while reading that shard sequentially.
+        """
+        if self._active:
+            raise RuntimeError("Close the active iterator before seeking")
+        if isinstance(shard, str):
+            try:
+                shard_index = self.shards.index(shard)
+            except ValueError as error:
+                raise ValueError(f"Shard is not part of this stream: {shard}") from error
+        elif type(shard) is int and 0 <= shard < len(self.shards):
+            shard_index = shard
+        else:
+            raise ValueError("Shard must be a URL in this stream or a valid shard index")
+        if type(index) is not int or index < 0:
+            raise ValueError("Sample index must be a non-negative integer")
+        if type(cycle) is not int or cycle < 0:
+            raise ValueError("Cycle must be a non-negative integer")
+        self._cycle, self._shard, self._sample = cycle, shard_index, index
+
     def load_state_dict(self, state: dict[str, Any]) -> None:
         """Restore a cursor after validating the stream identity.
 

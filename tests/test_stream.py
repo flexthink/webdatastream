@@ -69,6 +69,71 @@ def test_rejects_changed_shards() -> None:
         WebDataStream(["b.tar", "a.tar"]).load_state_dict(state)
 
 
+def test_seek_starts_at_named_shard_and_sample(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    paths = [tmp_path / f"{index}.tar" for index in range(3)]
+    for index, path in enumerate(paths):
+        make_shard(path, [f"{index}a", f"{index}b"])
+    urls = [str(path) for path in paths]
+    original = stream._download
+    staged: list[str] = []
+
+    def observed(url: str, destination: Path) -> Path:
+        staged.append(url)
+        return original(url, destination)
+
+    monkeypatch.setattr(stream, "_download", observed)
+    dataset = WebDataStream(urls)
+    dataset.seek(urls[1], 1)
+    assert dataset.state_dict()["position"] == [0, 1, 1]
+    assert [sample["__key__"] for sample in dataset] == ["1b", "2a", "2b"]
+    assert urls[0] not in staged
+
+
+def test_seek_rejects_invalid_position() -> None:
+    dataset = WebDataStream(["a.tar"])
+    with pytest.raises(ValueError, match="not part"):
+        dataset.seek("missing.tar")
+    with pytest.raises(ValueError, match="non-negative"):
+        dataset.seek("a.tar", -1)
+    with pytest.raises(ValueError, match="Cycle"):
+        dataset.seek("a.tar", cycle=-1)
+
+
+def test_seek_preserves_repeat_cycle(tmp_path: Path) -> None:
+    path = tmp_path / "one.tar"
+    make_shard(path, ["a", "b"])
+    dataset = WebDataStream([str(path)], repeat=True)
+    dataset.seek(0, 1, cycle=3)
+    iterator = iter(dataset)
+    assert next(iterator)["__key__"] == "b"
+    assert dataset.state_dict()["position"] == [3, 0, 2]
+    assert next(iterator)["__key__"] == "a"
+    assert dataset.state_dict()["position"] == [4, 0, 1]
+    iterator.close()
+
+
+def test_repeated_mid_shard_restarts_preserve_sequence(tmp_path: Path) -> None:
+    paths = [tmp_path / f"{index}.tar" for index in range(3)]
+    for index, path in enumerate(paths):
+        make_shard(path, [f"{index}a", f"{index}b", f"{index}c"])
+    urls = [str(path) for path in paths]
+    state = None
+    received: list[str] = []
+    for _ in range(4):
+        dataset = WebDataStream(urls, prefetch_shards=3)
+        if state is not None:
+            dataset.load_state_dict(state)
+        iterator = iter(dataset)
+        for _ in range(2):
+            received.append(next(iterator)["__key__"])
+        state = dataset.state_dict()
+        iterator.close()
+    resumed = WebDataStream(urls)
+    resumed.load_state_dict(state)
+    received.extend(sample["__key__"] for sample in resumed)
+    assert received == [f"{index}{letter}" for index in range(3) for letter in "abc"]
+
+
 def test_repeat_resume(tmp_path: Path) -> None:
     """A repeated stream recovers at the same cycle and sample."""
     path = tmp_path / "one.tar"
