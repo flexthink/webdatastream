@@ -385,6 +385,7 @@ class ParallelCachedDataset(IterableDataset):
         poll_interval=0.05,
         worker_init_fn=None,
         stats_interval=0,
+        preload_samples=0,
     ):
         super().__init__()
         if type(stats_interval) is not int or stats_interval < 0:
@@ -392,6 +393,9 @@ class ParallelCachedDataset(IterableDataset):
         self.stats_interval = stats_interval
         if type(buffer_size) is not int or buffer_size < 1:
             raise ValueError("buffer_size must be a positive number of samples")
+        if type(preload_samples) is not int or not 0 <= preload_samples <= buffer_size:
+            raise ValueError("preload_samples must be an integer between 0 and buffer_size")
+        self.preload_samples = preload_samples
         if type(seed) is not int or seed < 0:
             raise ValueError("seed must be a non-negative integer")
         if poll_interval <= 0 or (timeout is not None and timeout <= 0):
@@ -557,6 +561,42 @@ class ParallelCachedDataset(IterableDataset):
             exitpriority=10,
         )
         self._reader = SQLiteCache(self.cache_path, mode="read")
+        if self.preload_samples:
+            try:
+                self._wait_for_preload()
+            except BaseException:
+                self.close()
+                raise
+
+    def _wait_for_preload(self):
+        """Wait for unread records without advancing the consumed cursor."""
+        previous = -1
+        deadline = None
+        while True:
+            with self._condition:
+                available = self._published.value - self._consumed.value
+            if available >= self.preload_samples:
+                return
+            if available != previous:
+                previous = available
+                deadline = None if self.timeout is None else time.monotonic() + self.timeout
+            if self._errors.poll():
+                try:
+                    error = self._errors.recv()
+                except EOFError:
+                    error = None
+                if error is not None:
+                    raise CacheWriterError(error)
+            if self._done.is_set() or not self._process.is_alive():
+                # Publication may have raced the snapshot above.
+                with self._condition:
+                    if self._published.value - self._consumed.value >= self.preload_samples:
+                        return
+                raise RuntimeError("Source ended before preload_samples were available")
+            if deadline is not None and time.monotonic() >= deadline:
+                raise TimeoutError("Cache preload made no progress before timeout")
+            with self._condition:
+                self._condition.wait(self.poll_interval)
 
     def __iter__(self):
         if self._exhausted:

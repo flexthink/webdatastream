@@ -525,3 +525,42 @@ def test_invalid_stats_interval(tmp_path, interval):
     """Reject invalid display intervals before starting a process."""
     with pytest.raises(ValueError, match="stats_interval"):
         ParallelCachedDataset(_Map(1), tmp_path / "stats.db", stats_interval=interval)
+
+
+def test_preload_waits_without_consuming_and_repeats_after_recovery(tmp_path):
+    """Preload the target before returning the first record and retain order."""
+    path = tmp_path / "preload.db"
+    with ParallelCachedDataset(_Map(6), path, buffer_size=3,
+                               preload_samples=3, timeout=30) as dataset:
+        dataset.start()
+        assert dataset.stats()["buffered_samples"] == 3
+        assert dataset.total_samples == 0
+        assert next(dataset)["id"] == "0"
+        state = dataset.state_dict()
+    with ParallelCachedDataset(_Map(6), path, buffer_size=3,
+                               preload_samples=3, timeout=30) as restored:
+        restored.load_state_dict(state)
+        restored.start()
+        assert restored.stats()["buffered_samples"] == 3
+        assert restored.total_samples == 1
+        assert next(restored)["id"] == "1"
+
+
+@pytest.mark.parametrize("preload", [-1, 4, True, None, 1.5])
+def test_invalid_preload_target(tmp_path, preload):
+    """Reject impossible preload targets before starting a producer."""
+    with pytest.raises(ValueError, match="preload_samples"):
+        ParallelCachedDataset(_Map(4), tmp_path / "cache.db",
+                              buffer_size=3, preload_samples=preload)
+
+
+@pytest.mark.parametrize("failing", [False, True])
+def test_preload_source_shortfall_or_failure_closes_producer(tmp_path, failing):
+    """Stop waiting and release the process on exhausted or failed sources."""
+    dataset = ParallelCachedDataset(
+        _Map(2, fail_at=1 if failing else None), tmp_path / "preload.db",
+        buffer_size=3, preload_samples=3, timeout=30,
+    )
+    with pytest.raises(CacheWriterError if failing else RuntimeError):
+        dataset.start()
+    assert dataset._process is None

@@ -254,6 +254,14 @@ Keep the pipeline batch size unchanged on recovery.
 
 `ParallelCachedDataset` wraps a dataset and manages the producer process:
 
+Use `preload_samples=N` to wait for N unread records before `start()` or the
+first iteration returns. The default is 0. N must not exceed `buffer_size`.
+Preloading does not advance consumption and runs after checkpoint recovery
+when the producer starts, rather than at nominal epoch boundaries. Retained
+read-ahead counts toward the target. A source ending below the target raises
+an error; `timeout` limits time without preload progress, resetting whenever
+another sample is published.
+
 ```python
 from speechbrain.dataio.batch import PaddedBatch
 from speechbrain.dataio.dataloader import make_dataloader

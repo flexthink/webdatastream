@@ -62,6 +62,27 @@ def test_next_shard_download_starts_during_current_shard(tmp_path: Path, monkeyp
     iterator.close()
 
 
+def test_downloads_use_configured_cache_directory(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Stage downloads under cache_dir and clean up when the stream closes."""
+    shard = tmp_path / "one.tar"
+    make_shard(shard, ["a", "b"])
+    cache_dir = tmp_path / "training_cache"
+    destinations: list[Path] = []
+
+    def download(url: str, destination: Path) -> Path:
+        destinations.append(destination)
+        shutil.copyfile(shard, destination)
+        return destination
+
+    monkeypatch.setattr(stream, "_download", download)
+    iterator = iter(WebDataStream(["https://example.invalid/one.tar"], cache_dir=cache_dir))
+    assert next(iterator)["__key__"] == "a"
+    assert destinations[0].parent.parent == cache_dir
+    assert destinations[0].is_file()
+    iterator.close()
+    assert list(cache_dir.iterdir()) == []
+
+
 def test_rejects_changed_shards() -> None:
     """A cursor must not silently resume on a different shard order."""
     state = WebDataStream(["a.tar", "b.tar"]).state_dict()

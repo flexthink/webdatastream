@@ -124,11 +124,15 @@ class WebDataStream(IterableDataset[dict[str, Any]]):
     ssh_rsync : bool
         Intercept SSH and scp-style URLs with rsync using the user's SSH
         configuration. Enabled by default. Disable to use fsspec instead.
+    cache_dir : str or pathlib.Path, optional
+        Parent directory for temporary downloaded shards. Defaults to the
+        system temporary directory. Each iterator uses its own subdirectory.
     """
 
     def __init__(
         self, shards: Sequence[str], prefetch_shards: int = 2,
         repeat: bool = False, local_access: str = "stage", ssh_rsync: bool = True,
+        cache_dir: str | Path | None = None,
     ) -> None:
         super().__init__()
         if not shards:
@@ -142,6 +146,7 @@ class WebDataStream(IterableDataset[dict[str, Any]]):
         self.repeat = repeat
         self.local_access = local_access
         self.ssh_rsync = ssh_rsync
+        self.cache_dir = Path(cache_dir).expanduser().absolute() if cache_dir is not None else None
         self._cycle = self._shard = self._sample = 0
         self._active = False
 
@@ -159,7 +164,9 @@ class WebDataStream(IterableDataset[dict[str, Any]]):
             raise RuntimeError("Only one active iterator is supported")
         self._active = True
         try:
-            with tempfile.TemporaryDirectory(prefix="webdatastream-") as cache:
+            if self.cache_dir is not None:
+                self.cache_dir.mkdir(parents=True, exist_ok=True)
+            with tempfile.TemporaryDirectory(prefix="webdatastream-", dir=self.cache_dir) as cache:
                 with ThreadPoolExecutor(max_workers=self.prefetch_shards) as executor:
                     futures: dict[int, Future[Path]] = {}
                     cycle, shard_index, sample_index = self._cycle, self._shard, self._sample
