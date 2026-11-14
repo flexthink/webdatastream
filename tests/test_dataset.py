@@ -492,3 +492,36 @@ def test_reader_timeout_cancels_startup_and_leaves_a_recoverable_cursor(tmp_path
         next(dataset)
     assert dataset._process is None
     assert dataset.total_samples == 0
+
+
+@pytest.mark.parametrize("interval", [0, 2])
+def test_automatic_stats_from_both_processes(tmp_path, capfd, interval):
+    """Producer output is visible before consumption, with optional silence."""
+    with ParallelCachedDataset(
+        _Map(4), tmp_path / "stats.db", buffer_size=5,
+        stats_interval=interval, timeout=30,
+    ) as dataset:
+        dataset.start()
+        deadline = time.monotonic() + 30
+        while dataset.stats()["produced_samples"] < 4:
+            assert time.monotonic() < deadline
+            time.sleep(0.01)
+        # Publication precedes display, so join the finite producer first.
+        dataset._process.join(30)
+        assert not dataset._process.is_alive()
+        producer_output = capfd.readouterr().out
+        assert producer_output.count("Cache [producer]") == (2 if interval else 0)
+        assert "Cache [consumer]" not in producer_output
+        assert len(list(dataset)) == 4
+        consumer_output = capfd.readouterr().out
+        assert consumer_output.count("Cache [consumer]") == (2 if interval else 0)
+        if interval:
+            assert '"buffer_capacity": 5' in producer_output
+            assert '"consumed_samples": 4' in consumer_output
+
+
+@pytest.mark.parametrize("interval", [-1, True, 1.5, None])
+def test_invalid_stats_interval(tmp_path, interval):
+    """Reject invalid display intervals before starting a process."""
+    with pytest.raises(ValueError, match="stats_interval"):
+        ParallelCachedDataset(_Map(1), tmp_path / "stats.db", stats_interval=interval)

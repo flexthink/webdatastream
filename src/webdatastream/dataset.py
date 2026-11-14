@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import json
 from multiprocessing.util import Finalize
 import pickle
 import random
@@ -24,6 +25,24 @@ from speechbrain.utils.checkpoints import (
 from torch.utils.data import IterableDataset, get_worker_info
 
 from .cache import CacheWriterError, SQLiteCache, _deserialize, _serialize
+
+
+def _display_cache_stats(role, path, capacity, condition, consumed, published, metrics):
+    """Display one consistent cache snapshot after a producer or consumer step."""
+    with condition:
+        produced, taken = published.value, consumed.value
+        snapshot = {key: value.value for key, value in metrics.items()}
+    now = time.monotonic()
+    for side in ("producer", "consumer"):
+        started = snapshot.pop(f"{side}_wait_started")
+        snapshot[f"{side}_waiting"] = bool(started)
+        if started:
+            snapshot[f"{side}_wait_seconds"] += now - started
+    buffered = max(0, produced - taken)
+    snapshot.update(buffered_samples=buffered, buffer_capacity=capacity,
+                    fullness_percent=100.0 * buffered / capacity,
+                    produced_samples=produced, consumed_samples=taken)
+    print(f"Cache [{role}] {path}: {json.dumps(snapshot, sort_keys=True)}", flush=True)
 
 
 def _rng_state():
@@ -308,6 +327,10 @@ def _produce(
                         sequence - consumed.value,
                     )
                     condition.notify_all()
+                interval = options["stats_interval"]
+                if interval and sequence % interval == 0:
+                    _display_cache_stats("producer", path, options["buffer_size"],
+                                         condition, consumed, published, metrics)
     except BaseException:
         failure = traceback.format_exc()
         errors.send(failure[-8000:])
@@ -361,8 +384,12 @@ class ParallelCachedDataset(IterableDataset):
         timeout=None,
         poll_interval=0.05,
         worker_init_fn=None,
+        stats_interval=0,
     ):
         super().__init__()
+        if type(stats_interval) is not int or stats_interval < 0:
+            raise ValueError("stats_interval must be a non-negative integer")
+        self.stats_interval = stats_interval
         if type(buffer_size) is not int or buffer_size < 1:
             raise ValueError("buffer_size must be a positive number of samples")
         if type(seed) is not int or seed < 0:
@@ -491,6 +518,7 @@ class ParallelCachedDataset(IterableDataset):
             "repeat": self.repeat,
             "shuffle": self.shuffle,
             "buffer_size": self.buffer_size,
+            "stats_interval": self.stats_interval,
         }
         process = ctx.Process(
             target=_produce,
@@ -570,6 +598,11 @@ class ParallelCachedDataset(IterableDataset):
                         )
                         self._consumed.value = self._next_sequence
                         self._condition.notify_all()
+                    if self.stats_interval and self._next_sequence % self.stats_interval == 0:
+                        _display_cache_stats(
+                            "consumer", self.cache_path, self.buffer_size,
+                            self._condition, self._consumed, self._published, self._metrics,
+                        )
                     return record["item"]
                 # Check errors only after draining committed records. The
                 # producer sends no tensor objects over multiprocessing IPC.

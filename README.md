@@ -294,6 +294,12 @@ not start a process; iteration does, or call `start()` for earlier prefetch.
 
 Use `dataset.stats()` for a logging-friendly snapshot of cache fullness:
 
+Pass `stats_interval=5` to also print a cache snapshot every five produced
+samples and every five consumed samples, independently in each process.
+The default `stats_interval=0` disables automatic output. Each line names the
+producer or consumer and database path and includes fullness, sample counters,
+peak buffering, and wait metrics. This interval counts samples before batching.
+
 ```python
 stats = dataset.stats()
 print(
