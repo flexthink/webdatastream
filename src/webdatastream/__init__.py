@@ -8,6 +8,7 @@ __all__ = [
     "CacheWriterError",
     "SQLiteCachedDynamicItem",
     "ParallelCachedDataset",
+    "BatchedPipelineDataset",
 ]
 
 
@@ -17,10 +18,10 @@ def __getattr__(name):
         from . import cache
 
         return getattr(cache, name)
-    if name == "SQLiteCachedDynamicItem":
-        from .pipeline import SQLiteCachedDynamicItem
+    if name in ("SQLiteCachedDynamicItem", "BatchedPipelineDataset"):
+        from . import pipeline
 
-        return SQLiteCachedDynamicItem
+        return getattr(pipeline, name)
     if name == "ParallelCachedDataset":
         from .dataset import ParallelCachedDataset
 

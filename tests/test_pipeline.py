@@ -13,7 +13,77 @@ from speechbrain.dataio.batch import PaddedData
 from speechbrain.utils.data_pipeline import DataPipeline, provides, takes
 from tensordict import TensorDict
 
-from webdatastream import SQLiteCachedDynamicItem
+from webdatastream import SQLiteCachedDynamicItem, BatchedPipelineDataset, ParallelCachedDataset
+
+
+class _Waveforms(torch.utils.data.IterableDataset):
+    """Finite stateful source with unequal waveform lengths."""
+
+    def __init__(self):
+        self.position = 0
+
+    def __iter__(self):
+        while self.position < 5:
+            index = self.position
+            self.position += 1
+            yield {"id": str(index), "signal": torch.arange(index + 2).float()}
+
+    def state_dict(self):
+        return {"position": self.position}
+
+    def load_state_dict(self, state):
+        self.position = state["position"]
+
+
+def _batched_waveforms(calls):
+    @takes("signal")
+    @provides("audio")
+    def decode(signal):
+        return signal + 1
+
+    @takes("audio")
+    @provides("latent")
+    def encode(signals):
+        calls.append(len(signals))
+        padded = torch.nn.utils.rnn.pad_sequence(signals, batch_first=True)
+        return PaddedData(padded * 2, torch.tensor([len(s) / padded.shape[1] for s in signals]))
+
+    return BatchedPipelineDataset(
+        _Waveforms(),
+        DataPipeline(["id", "signal"], [decode], ["id", "audio"]),
+        DataPipeline(["id", "audio"], [encode], ["latent"]),
+        batch_size=3,
+    )
+
+
+def test_two_stage_pipeline_partial_batch_and_checkpoint():
+    """Trim PaddedData and recover a batch suffix without encoding it twice."""
+    calls = []
+    source = _batched_waveforms(calls)
+    iterator = iter(source)
+    first = next(iterator)
+    state = source.state_dict()
+    expected = list(iterator)
+    assert calls == [3, 2]
+    assert first["id"] == "0"
+    restored_calls = []
+    restored = _batched_waveforms(restored_calls)
+    restored.load_state_dict(state)
+    actual = list(restored)
+    assert restored_calls == [2]
+    assert [r["id"] for r in actual] == [r["id"] for r in expected]
+    for index, record in enumerate([first, *actual]):
+        assert record["latent"].shape == (index + 2,)
+        torch.testing.assert_close(record["latent"], (torch.arange(index + 2).float() + 1) * 2)
+
+
+def test_two_stage_pipeline_spawned_cache(tmp_path):
+    """Keep sample order and variable lengths with a buffer below codec batch size."""
+    with ParallelCachedDataset(_batched_waveforms([]), tmp_path / "batch.db",
+                               buffer_size=1, timeout=30) as cache:
+        records = list(cache)
+    assert [r["id"] for r in records] == [str(i) for i in range(5)]
+    assert [len(r["latent"]) for r in records] == [2, 3, 4, 5, 6]
 
 
 def test_serialized_padded_data_keeps_its_named_fields(tmp_path):

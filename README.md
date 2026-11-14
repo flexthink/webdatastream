@@ -223,6 +223,35 @@ and basic Python scalar values.
 
 ## Spawned caching dataset
 
+`BatchedPipelineDataset` separates itemwise and batched SpeechBrain transforms:
+
+```python
+from speechbrain.utils.data_pipeline import DataPipeline
+from webdatastream import BatchedPipelineDataset, ParallelCachedDataset
+
+source = BatchedPipelineDataset(
+    checkpointable_records,
+    DataPipeline(["id", "audio"], [audio_pipeline], ["id", "signal"]),
+    DataPipeline(["id", "signal"], [features_pipeline], ["latent"]),
+    batch_size=8,
+)
+dataset = ParallelCachedDataset(source, "features.sqlite3", buffer_size=128)
+```
+
+The first pipeline receives each source mapping. Its outputs are collected as
+lists by key and passed to the second pipeline once per batch. A batch dynamic
+item can call a codec on the entire list and return `PaddedData`. Batch outputs
+are split and trimmed into individual records, retaining the itemwise fields;
+matching batch keys replace itemwise values. The final incomplete batch is
+processed too. Cache capacity and consumer batch size remain independent of
+codec batch size, with up to one additional transformed batch in producer memory.
+Construct accelerator models inside a producer factory, as shown below.
+
+The source must implement `state_dict` and `load_state_dict`. Recovery saves
+both the source cursor and transformed outputs from a partially delivered batch,
+so resuming never skips that batch's remaining records or repeats its transform.
+Keep the pipeline batch size unchanged on recovery.
+
 `ParallelCachedDataset` wraps a dataset and manages the producer process:
 
 ```python

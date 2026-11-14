@@ -3,15 +3,122 @@
 from __future__ import annotations
 
 import math
+import copy
+from collections import deque
 from collections.abc import Mapping, Sequence
 from typing import Any
 
 import torch
 from speechbrain.dataio.batch import PaddedData
 from speechbrain.utils.data_pipeline import DynamicItem, GeneratorDynamicItem
+from speechbrain.utils.data_pipeline import DataPipeline
+from torch.utils.data import IterableDataset
 from tensordict import TensorDictBase
 
 from .cache import SQLiteCache
+
+
+class BatchedPipelineDataset(IterableDataset):
+    """Run itemwise dynamic items, batch their outputs, then run batch items.
+
+    Both pipelines are SpeechBrain DataPipeline instances. Itemwise outputs
+    are collected into lists by key. Batch outputs replace matching keys and
+    are split back into records; PaddedData is trimmed to each true length.
+    The source must implement state_dict/load_state_dict for exact recovery.
+    """
+
+    def __init__(self, dataset, item_pipeline, batch_pipeline, batch_size):
+        """Configure the two stages.
+
+        Arguments
+        ---------
+        dataset : iterable
+            Checkpointable source yielding mappings.
+        item_pipeline, batch_pipeline : DataPipeline
+            Per-record and per-batch transforms.
+        batch_size : int
+            Maximum number of records per transform call.
+
+        Returns
+        -------
+        None
+        """
+        super().__init__()
+        if type(batch_size) is not int or batch_size < 1:
+            raise ValueError("batch_size must be a positive integer")
+        if not all(callable(getattr(dataset, name, None))
+                   for name in ("state_dict", "load_state_dict")):
+            raise TypeError("BatchedPipelineDataset requires a checkpointable source")
+        self.dataset = dataset
+        self.item_pipeline = item_pipeline
+        self.batch_pipeline = batch_pipeline
+        self.batch_size = batch_size
+        self._pending = deque()
+
+    def __iter__(self):
+        """Yield transformed records, including the final incomplete batch.
+
+        Yields
+        ------
+        dict
+            One record with unpadded batch outputs.
+        """
+        source = iter(self.dataset)
+        try:
+            while True:
+                while self._pending:
+                    yield self._pending.popleft()
+                records = []
+                for _ in range(self.batch_size):
+                    try:
+                        record = next(source)
+                    except StopIteration:
+                        break
+                    records.append(self.item_pipeline.compute_outputs(record))
+                if not records:
+                    return
+                inputs = {key: [record[key] for record in records]
+                          for key in records[0]}
+                outputs = self.batch_pipeline.compute_outputs(inputs)
+                columns = {key: _unbatch(value, len(records))
+                           for key, value in outputs.items()}
+                for index, record in enumerate(records):
+                    self._pending.append({**record, **{
+                        key: values[index] for key, values in columns.items()
+                    }})
+        finally:
+            close = getattr(source, "close", None)
+            if close is not None:
+                close()
+
+    def state_dict(self):
+        """Save the source cursor and transformed records awaiting delivery.
+
+        Returns
+        -------
+        dict
+            Exact next-record state, including a partially delivered batch.
+        """
+        return {"source": copy.deepcopy(self.dataset.state_dict()),
+                "pending": copy.deepcopy(list(self._pending)),
+                "batch_size": self.batch_size}
+
+    def load_state_dict(self, state):
+        """Restore a source cursor and the unconsumed batch suffix.
+
+        Arguments
+        ---------
+        state : dict
+            Saved next-record state.
+
+        Returns
+        -------
+        None
+        """
+        if state["batch_size"] != self.batch_size:
+            raise ValueError("Cannot recover with a different pipeline batch_size")
+        self.dataset.load_state_dict(copy.deepcopy(state["source"]))
+        self._pending = deque(copy.deepcopy(state["pending"]))
 
 
 def _unbatch(value: Any, count: int) -> list[Any]:
